@@ -1,129 +1,86 @@
-// api/webhook.js
-import fetch from 'node-fetch';
-
-let lastPaypalRaw = "No PayPal payload received yet";
-let lastAmount = "0.00 USD";
-let lastInvoiceId = "No invoice_id";
-let lastTransactionId = "No transaction ID";
-
-// PayPal credentials
-const PAYPAL_CLIENT_ID = "ASK7Hk7YyRS-jh6h6dqmxONNPjyx4gZXc1ZhY9dO6l1P1ggt4mOdXkpurySzZWkU6G_PtG3qVfi22MVz";
-const PAYPAL_SECRET = "EAHTIg0RL66_PHBW_-3eEgORIVBm8WXHGNTRNtSMjRkR-BHwPGTWQM3o22IECCzCQhbl7kUDEB5DicII";
-const PAYPAL_WEBHOOK_ID = "50B41732U3687421A"; // Your webhook ID
-const SANDBOX = true;
-
-const PAYPAL_OAUTH_URL = SANDBOX
-  ? "https://api-m.sandbox.paypal.com/v1/oauth2/token"
-  : "https://api-m.paypal.com/v1/oauth2/token";
-
-const PAYPAL_VERIFY_URL = SANDBOX
-  ? "https://api-m.sandbox.paypal.com/v1/notifications/verify-webhook-signature"
-  : "https://api-m.paypal.com/v1/notifications/verify-webhook-signature";
-
-// Disable default body parsing
-export const config = {
-  api: {
-    bodyParser: false,
-  },
-};
-
-// Get access token from PayPal
-async function getAccessToken() {
-  const creds = Buffer.from(`${PAYPAL_CLIENT_ID}:${PAYPAL_SECRET}`).toString("base64");
-  const res = await fetch(PAYPAL_OAUTH_URL, {
-    method: "POST",
-    headers: {
-      "Authorization": `Basic ${creds}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: "grant_type=client_credentials",
-  });
-  const data = await res.json();
-  return data.access_token;
-}
-
-// Verify webhook signature
-async function verifyWebhookSignature(accessToken, bodyText, headers) {
-  const res = await fetch(PAYPAL_VERIFY_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${accessToken}`,
-    },
-    body: JSON.stringify({
-      auth_algo: headers['paypal-auth-algo'],
-      cert_url: headers['paypal-cert-url'],
-      transmission_id: headers['paypal-transmission-id'],
-      transmission_sig: headers['paypal-transmission-sig'],
-      transmission_time: headers['paypal-transmission-time'],
-      webhook_id: PAYPAL_WEBHOOK_ID,
-      webhook_event: JSON.parse(bodyText),
-    }),
-  });
-  const data = await res.json();
-  return data.verification_status === "SUCCESS";
-}
-
-export default async function handler(req, res) {
-  if (req.method === "POST") {
-    try {
-      // Read raw body
-      let bodyText = "";
-      await new Promise((resolve) => {
-        let data = "";
-        req.on("data", chunk => { data += chunk; });
-        req.on("end", () => { bodyText = data; resolve(); });
-      });
-
-      // Extract PayPal headers
-      const headers = {
-        'paypal-transmission-id': req.headers['paypal-transmission-id'],
-        'paypal-transmission-time': req.headers['paypal-transmission-time'],
-        'paypal-transmission-sig': req.headers['paypal-transmission-sig'],
-        'paypal-cert-url': req.headers['paypal-cert-url'],
-        'paypal-auth-algo': req.headers['paypal-auth-algo'],
-      };
-
-      // Verify webhook
-      const accessToken = await getAccessToken();
-      const verified = await verifyWebhookSignature(accessToken, bodyText, headers);
-
-      if (!verified) {
-        console.error("Webhook signature verification failed");
-        return res.status(400).json({ error: "Webhook verification failed" });
-      }
-
-      // Parse and store data
-      const body = JSON.parse(bodyText);
-      lastPaypalRaw = JSON.stringify(body, null, 2);
-
-      const resource = body.resource || {};
-      const amount = resource.amount || {};
-      lastAmount = `${amount.value || "0.00"} ${amount.currency_code || "USD"}`;
-      lastInvoiceId = resource.invoice_id || resource.custom_id || "No invoice_id";
-      lastTransactionId = resource.id || "No transaction ID";
-
-      console.log("Webhook received:", lastPaypalRaw);
-      console.log("Parsed values:", { lastAmount, lastInvoiceId, lastTransactionId });
-
-      return res.status(200).json({ success: true });
-    } catch (err) {
-      console.error("Error processing webhook:", err);
-      return res.status(500).json({ error: "Internal Server Error" });
-    }
+import "dotenv/config";
+import express from "express";
+ 
+import crypto from "crypto"
+import crc32 from "buffer-crc32"
+ 
+import fs from "fs/promises"
+import fetch from "node-fetch"
+ 
+// Note: PayPal only delivers webhooks to port 443 (HTTPS).
+// Development ports can be used in a forwarding configuration, set 443 if this is front-facing.
+const { LISTEN_PORT = 8888, LISTEN_PATH="/", CACHE_DIR = ".", WEBHOOK_ID = "<from when the listener URL was subscribed>" } = process.env;
+ 
+async function downloadAndCache(url, cacheKey) {
+  if(!cacheKey) {
+    cacheKey = url.replace(/\W+/g, '-')
   }
-
-  if (req.method === "GET") {
-    return res.status(200).send(`
-<h2>Last PayPal Webhook Data</h2>
-<p><strong>Amount:</strong> ${lastAmount}</p>
-<p><strong>Invoice ID:</strong> ${lastInvoiceId}</p>
-<p><strong>Transaction ID:</strong> ${lastTransactionId}</p>
-<pre>${lastPaypalRaw}</pre>
-`);
+  const filePath = `${CACHE_DIR}/${cacheKey}`;
+ 
+  // Check if cached file exists
+  const cachedData = await fs.readFile(filePath, 'utf-8').catch(() => null);
+  if (cachedData) {
+    return cachedData;
   }
-
-  res.setHeader("Allow", ["POST", "GET"]);
-  return res.status(405).end(`Method ${req.method} Not Allowed`);
+ 
+  // Download the file if not cached
+  const response = await fetch(url);
+  const data = await response.text()
+  await fs.writeFile(filePath, data);
+ 
+  return data;
 }
-
+ 
+const app = express();
+ 
+app.post(LISTEN_PATH, express.raw({type: 'application/json'}), async (request, response) => {
+  const headers = request.headers;
+  const event = request.body;
+  const data = JSON.parse(event)
+ 
+  console.log(`headers`, headers);
+  console.log(`parsed json`, JSON.stringify(data, null, 2));
+  console.log(`raw event: ${event}`);
+ 
+  const isSignatureValid = await verifySignature(event, headers);
+ 
+  if (isSignatureValid) {
+    console.log('Signature is valid.');
+ 
+    // Successful receipt of webhook, do something with the webhook data here to process it, e.g. write to database
+    console.log(`Received event`, JSON.stringify(data, null, 2));
+ 
+  } else {
+    console.log(`Signature is not valid for ${data?.id} ${headers?.['correlation-id']}`);
+    // Reject processing the webhook event. May wish to log all headers+data for debug purposes.
+  }
+ 
+  // Return a 200 response to mark successful webhook delivery
+  response.sendStatus(200);
+});
+ 
+async function verifySignature(event, headers) {
+  const transmissionId = headers['paypal-transmission-id']
+  const timeStamp = headers['paypal-transmission-time']
+  const crc = parseInt("0x" + crc32(event).toString('hex')); // hex crc32 of raw event data, parsed to decimal form
+ 
+  const message = `${transmissionId}|${timeStamp}|${WEBHOOK_ID}|${crc}`
+  console.log(`Original signed message ${message}`);
+ 
+  const certPem = await downloadAndCache(headers['paypal-cert-url']);
+ 
+  // Create buffer from base64-encoded signature
+  const signatureBuffer = Buffer.from(headers['paypal-transmission-sig'], 'base64');
+ 
+  // Create a verification object
+  const verifier = crypto.createVerify('SHA256');
+ 
+  // Add the original message to the verifier
+  verifier.update(message);
+ 
+  return verifier.verify(certPem, signatureBuffer);
+}
+ 
+app.listen(LISTEN_PORT, () => {
+  console.log(`Node server listening at http://localhost:${LISTEN_PORT}/`);
+});
