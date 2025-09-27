@@ -1,0 +1,7 @@
+import PDFDocument from "pdfkit";
+import fs from "fs/promises";
+const doc = new PDFDocument();
+doc.text(`Payment ID: ${data.resource.id}`);
+doc.text(`Amount: ${data.resource.amount.value}`);
+await doc.pipe(fs.createWriteStream("/tmp/receipt.pdf"));
+doc.end();
