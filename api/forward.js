@@ -14,8 +14,13 @@ export default async function handler(req, res) {
   }
 
   try {
-    const bodyToSend = req.body && Object.keys(req.body).length ? JSON.stringify(req.body) : undefined;
+    // If body exists, stringify it, otherwise undefined
+    let bodyToSend = undefined;
+    if (req.body && Object.keys(req.body).length) {
+      bodyToSend = JSON.stringify(req.body);
+    }
 
+    // Forward request to Azure
     const response = await fetch(azureUrl, {
       method: req.method,
       headers: { 'Content-Type': 'application/json' },
@@ -23,6 +28,8 @@ export default async function handler(req, res) {
     });
 
     const text = await response.text();
+    console.log('Azure response status:', response.status, 'body:', text);
+
     res.status(response.status).send(text);
 
   } catch (err) {
