@@ -9,8 +9,8 @@ let lastTransactionId = "No transaction ID";
 // PayPal credentials
 const PAYPAL_CLIENT_ID = "ASK7Hk7YyRS-jh6h6dqmxONNPjyx4gZXc1ZhY9dO6l1P1ggt4mOdXkpurySzZWkU6G_PtG3qVfi22MVz";
 const PAYPAL_SECRET = "EAHTIg0RL66_PHBW_-3eEgORIVBm8WXHGNTRNtSMjRkR-BHwPGTWQM3o22IECCzCQhbl7kUDEB5DicII";
-const PAYPAL_WEBHOOK_ID = "50B41732U3687421A"; // The ID PayPal gave your webhook
-const SANDBOX = true; // Set to false for live
+const PAYPAL_WEBHOOK_ID = "50B41732U3687421A"; // Your webhook ID
+const SANDBOX = true;
 
 const PAYPAL_OAUTH_URL = SANDBOX
   ? "https://api-m.sandbox.paypal.com/v1/oauth2/token"
@@ -20,12 +20,14 @@ const PAYPAL_VERIFY_URL = SANDBOX
   ? "https://api-m.sandbox.paypal.com/v1/notifications/verify-webhook-signature"
   : "https://api-m.paypal.com/v1/notifications/verify-webhook-signature";
 
+// Disable default body parsing
 export const config = {
   api: {
     bodyParser: false,
   },
 };
 
+// Get access token from PayPal
 async function getAccessToken() {
   const creds = Buffer.from(`${PAYPAL_CLIENT_ID}:${PAYPAL_SECRET}`).toString("base64");
   const res = await fetch(PAYPAL_OAUTH_URL, {
@@ -36,11 +38,11 @@ async function getAccessToken() {
     },
     body: "grant_type=client_credentials",
   });
-
   const data = await res.json();
   return data.access_token;
 }
 
+// Verify webhook signature
 async function verifyWebhookSignature(accessToken, bodyText, headers) {
   const res = await fetch(PAYPAL_VERIFY_URL, {
     method: "POST",
@@ -58,7 +60,6 @@ async function verifyWebhookSignature(accessToken, bodyText, headers) {
       webhook_event: JSON.parse(bodyText),
     }),
   });
-
   const data = await res.json();
   return data.verification_status === "SUCCESS";
 }
@@ -74,6 +75,7 @@ export default async function handler(req, res) {
         req.on("end", () => { bodyText = data; resolve(); });
       });
 
+      // Extract PayPal headers
       const headers = {
         'paypal-transmission-id': req.headers['paypal-transmission-id'],
         'paypal-transmission-time': req.headers['paypal-transmission-time'],
@@ -82,6 +84,7 @@ export default async function handler(req, res) {
         'paypal-auth-algo': req.headers['paypal-auth-algo'],
       };
 
+      // Verify webhook
       const accessToken = await getAccessToken();
       const verified = await verifyWebhookSignature(accessToken, bodyText, headers);
 
@@ -90,6 +93,7 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: "Webhook verification failed" });
       }
 
+      // Parse and store data
       const body = JSON.parse(bodyText);
       lastPaypalRaw = JSON.stringify(body, null, 2);
 
@@ -119,7 +123,7 @@ export default async function handler(req, res) {
 `);
   }
 
-  res.setHeader("Allow", ["POST","GET"]);
+  res.setHeader("Allow", ["POST", "GET"]);
   return res.status(405).end(`Method ${req.method} Not Allowed`);
 }
 
