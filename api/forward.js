@@ -1,41 +1,52 @@
 // api/webhook.js
-import qs from 'querystring';
 import fetch from 'node-fetch';
 
-let lastAmount = "No payment received yet";
-let lastInvoiceId = "Unknown";
-let lastTransactionId = "Unknown";
 let lastPaypalRaw = "No PayPal payload received yet";
+let lastAmount = "0.00 USD";
+let lastInvoiceId = "No invoice_id";
+let lastTransactionId = "No transaction ID";
 
-// Replace these with your sandbox credentials
+// PayPal credentials
 const PAYPAL_CLIENT_ID = "ASK7Hk7YyRS-jh6h6dqmxONNPjyx4gZXc1ZhY9dO6l1P1ggt4mOdXkpurySzZWkU6G_PtG3qVfi22MVz";
 const PAYPAL_SECRET = "EAHTIg0RL66_PHBW_-3eEgORIVBm8WXHGNTRNtSMjRkR-BHwPGTWQM3o22IECCzCQhbl7kUDEB5DicII";
+const PAYPAL_WEBHOOK_ID = "50B41732U3687421A"; // The ID PayPal gave your webhook
+const SANDBOX = true; // Set to false for live
+
+const PAYPAL_OAUTH_URL = SANDBOX
+  ? "https://api-m.sandbox.paypal.com/v1/oauth2/token"
+  : "https://api-m.paypal.com/v1/oauth2/token";
+
+const PAYPAL_VERIFY_URL = SANDBOX
+  ? "https://api-m.sandbox.paypal.com/v1/notifications/verify-webhook-signature"
+  : "https://api-m.paypal.com/v1/notifications/verify-webhook-signature";
 
 export const config = {
-  api: { bodyParser: false }, // Disable automatic parsing
+  api: {
+    bodyParser: false,
+  },
 };
 
-async function getPaypalAccessToken() {
-  const auth = Buffer.from(`${PAYPAL_CLIENT_ID}:${PAYPAL_SECRET}`).toString('base64');
-  const resp = await fetch('https://api.sandbox.paypal.com/v1/oauth2/token', {
-    method: 'POST',
+async function getAccessToken() {
+  const creds = Buffer.from(`${PAYPAL_CLIENT_ID}:${PAYPAL_SECRET}`).toString("base64");
+  const res = await fetch(PAYPAL_OAUTH_URL, {
+    method: "POST",
     headers: {
-      'Authorization': `Basic ${auth}`,
-      'Content-Type': 'application/x-www-form-urlencoded',
+      "Authorization": `Basic ${creds}`,
+      "Content-Type": "application/x-www-form-urlencoded",
     },
-    body: 'grant_type=client_credentials',
+    body: "grant_type=client_credentials",
   });
-  const data = await resp.json();
+
+  const data = await res.json();
   return data.access_token;
 }
 
-async function verifyWebhook(body, headers) {
-  const accessToken = await getPaypalAccessToken();
-  const resp = await fetch('https://api.sandbox.paypal.com/v1/notifications/verify-webhook-signature', {
-    method: 'POST',
+async function verifyWebhookSignature(accessToken, bodyText, headers) {
+  const res = await fetch(PAYPAL_VERIFY_URL, {
+    method: "POST",
     headers: {
-      'Authorization': `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${accessToken}`,
     },
     body: JSON.stringify({
       auth_algo: headers['paypal-auth-algo'],
@@ -43,42 +54,44 @@ async function verifyWebhook(body, headers) {
       transmission_id: headers['paypal-transmission-id'],
       transmission_sig: headers['paypal-transmission-sig'],
       transmission_time: headers['paypal-transmission-time'],
-      webhook_id: 'YOUR_SANDBOX_WEBHOOK_ID', // Replace with your webhook ID
-      webhook_event: body
+      webhook_id: PAYPAL_WEBHOOK_ID,
+      webhook_event: JSON.parse(bodyText),
     }),
   });
-  const data = await resp.json();
-  return data.verification_status === 'SUCCESS';
+
+  const data = await res.json();
+  return data.verification_status === "SUCCESS";
 }
 
 export default async function handler(req, res) {
-  if (req.method === 'POST') {
+  if (req.method === "POST") {
     try {
-      let bodyText = '';
+      // Read raw body
+      let bodyText = "";
       await new Promise((resolve) => {
-        let data = '';
-        req.on('data', chunk => { data += chunk; });
-        req.on('end', () => { bodyText = data; resolve(); });
+        let data = "";
+        req.on("data", chunk => { data += chunk; });
+        req.on("end", () => { bodyText = data; resolve(); });
       });
 
-      // Parse JSON or fallback to form-encoded
-      let body;
-      try {
-        body = JSON.parse(bodyText);
-      } catch {
-        const parsed = qs.parse(bodyText);
-        const key = Object.keys(parsed)[0];
-        body = JSON.parse(key);
-      }
+      const headers = {
+        'paypal-transmission-id': req.headers['paypal-transmission-id'],
+        'paypal-transmission-time': req.headers['paypal-transmission-time'],
+        'paypal-transmission-sig': req.headers['paypal-transmission-sig'],
+        'paypal-cert-url': req.headers['paypal-cert-url'],
+        'paypal-auth-algo': req.headers['paypal-auth-algo'],
+      };
 
-      lastPaypalRaw = JSON.stringify(body, null, 2);
+      const accessToken = await getAccessToken();
+      const verified = await verifyWebhookSignature(accessToken, bodyText, headers);
 
-      // Verify webhook
-      const verified = await verifyWebhook(body, req.headers);
       if (!verified) {
-        console.warn("Webhook verification failed!");
-        return res.status(400).json({ error: 'Webhook verification failed' });
+        console.error("Webhook signature verification failed");
+        return res.status(400).json({ error: "Webhook verification failed" });
       }
+
+      const body = JSON.parse(bodyText);
+      lastPaypalRaw = JSON.stringify(body, null, 2);
 
       const resource = body.resource || {};
       const amount = resource.amount || {};
@@ -91,12 +104,12 @@ export default async function handler(req, res) {
 
       return res.status(200).json({ success: true });
     } catch (err) {
-      console.error('Error processing webhook:', err);
-      return res.status(500).json({ error: 'Internal Server Error' });
+      console.error("Error processing webhook:", err);
+      return res.status(500).json({ error: "Internal Server Error" });
     }
   }
 
-  if (req.method === 'GET') {
+  if (req.method === "GET") {
     return res.status(200).send(`
 <h2>Last PayPal Webhook Data</h2>
 <p><strong>Amount:</strong> ${lastAmount}</p>
@@ -106,7 +119,7 @@ export default async function handler(req, res) {
 `);
   }
 
-  res.setHeader('Allow', ['POST','GET']);
+  res.setHeader("Allow", ["POST","GET"]);
   return res.status(405).end(`Method ${req.method} Not Allowed`);
 }
 
