@@ -1,114 +1,152 @@
-// api/webhook.js
-let lastAmount = "No payment received yet";
-let lastCustomerFirstName = "No customer first name yet";
-let lastCustomerLastName = "No customer last name yet";
-let lastCustomerEmail = "No customer email yet";
-let lastInvoiceId = " ";
-let lastPaypalRaw = "No PayPal payload received yet";
-let lastTransactionId = " ";
-let lastJotFormPretty = "No JotForm submission received yet";
+const PDFDocument = require('pdfkit');
+const nodemailer = require('nodemailer');
+const data = require('../../data');  // Adjust path if needed
 
-export default async function handler(req, res) {
-  if (req.method === "POST") {
-    // PayPal webhook
-    try {
-      const body = req.body;
-      lastPaypalRaw = JSON.stringify(body, null, 2);
-
-      if (!body.resource) {
-        console.warn("Missing resource in PayPal payload");
-        return res.status(200).send("OK");
-      }
-
-      // Extract payment details
-      const amount = body.resource.amount?.value;
-      const currency = body.resource.amount?.currency_code;
-      lastAmount = amount && currency ? `${amount} ${currency}` : "Unknown";
-
-      lastInvoiceId = body.resource.invoice_id || "Unknown";
-      lastTransactionId = body.resource.id || "Unknown";
-
-      console.log("PayPal webhook processed:", {
-        amount: lastAmount,
-        invoice: lastInvoiceId,
-        transaction: lastTransactionId,
-      });
-
-      return res.status(200).send("PayPal webhook received");
-    } catch (err) {
-      console.error("Error handling PayPal webhook:", err);
-      return res.status(200).send("Error processing webhook");
-    }
-  }
-
-  if (req.method === "GET") {
-    // Test endpoint
-    const response = `
-      Last payment amount: ${lastAmount}
-      Last invoice ID: ${lastInvoiceId}
-      Last transaction ID: ${lastTransactionId}
-      Customer first name: ${lastCustomerFirstName}
-      Customer last name: ${lastCustomerLastName}
-      Customer email: ${lastCustomerEmail}
-
-      Last JotForm pretty:
-      ${lastJotFormPretty}
-
-      Last PayPal raw JSON:
-      ${lastPaypalRaw}
-    `;
-    return res.status(200).send(response);
-  }
-
-  return res.status(405).send("Method Not Allowed");
-}
-
-// JotForm webhook endpoint
-export const config = {
-  api: {
-    bodyParser: {
-      sizeLimit: "1mb",
-    },
-  },
-};
-
-// Create a separate endpoint for JotForm
-export async function jotformHandler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(405).send("Method Not Allowed");
-  }
-
-  const formData = req.body;
-
-  console.log("JotForm payload received:", formData);
-
-  const rawRequest = formData.rawRequest;
-  if (!rawRequest) {
-    return res.status(400).send("Missing rawRequest field");
-  }
+// Helper to send email with PDF
+async function sendEmailWithPdf(toEmail, subject, message, pdfBytes) {
+  const fromEmail = process.env.GMAIL_USER || 'rdionian69@gmail.com';  // Use env vars for security
+  const pw = process.env.GMAIL_PASS || 'zvtxhymdnlwzapla';
 
   try {
-    const data = JSON.parse(rawRequest);
-
-    lastCustomerFirstName = data.q3_name?.first || "Unknown";
-    lastCustomerLastName = data.q3_name?.last || "Unknown";
-    lastCustomerEmail = data.q4_email || "Unknown";
-
-    lastInvoiceId =
-      data.q7_invoiceId || `ServerGen_${Date.now().toString(36)}`;
-
-    lastJotFormPretty = formData.pretty || JSON.stringify(data, null, 2);
-
-    console.log("Extracted JotForm fields:", {
-      firstName: lastCustomerFirstName,
-      lastName: lastCustomerLastName,
-      email: lastCustomerEmail,
-      invoice: lastInvoiceId,
+    const transporter = nodemailer.createTransport({
+      host: 'smtp.gmail.com',
+      port: 587,
+      secure: false,
+      auth: { user: fromEmail, pass: pw }
     });
 
-    return res.status(200).json({ invoiceID: lastInvoiceId });
-  } catch (err) {
-    console.error("Error parsing JotForm JSON:", err);
-    return res.status(400).send("Invalid JSON in rawRequest");
+    await transporter.sendMail({
+      from: fromEmail,
+      to: toEmail,
+      subject: subject,
+      text: message,
+      attachments: [{ filename: 'Receipt.pdf', content: pdfBytes }]
+    });
+    console.log(`Email sent successfully to ${toEmail}`);
+  } catch (ex) {
+    console.error(`Error sending email to ${toEmail}:`, ex);
   }
 }
+
+module.exports = async (req, res) => {
+  if (req.method === 'POST') {  // PayPal Webhook
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', async () => {
+      console.log('===== PayPal Webhook Received =====');
+      console.log('Raw JSON Payload:\n', body);
+
+      data.setLastPaypalRaw(body);
+
+      try {
+        const payload = JSON.parse(body);
+        const resource = payload.resource;
+
+        if (!resource) {
+          console.warn("Missing 'resource' field in payload.");
+          return res.status(200).end();
+        }
+
+        let total = null;
+        let currency = null;
+        if (resource.amount) {
+          total = resource.amount.value;
+          currency = resource.amount.currency_code;
+        }
+
+        const invoiceId = resource.invoice_id || "Unknown";
+        const transactionId = resource.id || "Unknown";
+
+        let formattedAmount = '';
+        if (total && currency) {
+          formattedAmount = `${total} ${currency}`;
+          data.setLastAmount(formattedAmount);
+        }
+        data.setLastInvoiceId(invoiceId);
+        data.setLastTransactionId(transactionId);
+
+        console.log('Extracted Fields:');
+        console.log(`Amount: ${formattedAmount}`);
+        console.log(`Invoice ID: ${invoiceId}`);
+        console.log(`Transaction ID: ${transactionId}`);
+
+        // Use latest customer info
+        const customerFirstName = data.lastCustomerFirstName || "Customer";
+        const customerLastName = data.lastCustomerLastName || "";
+        const customerEmail = data.lastCustomerEmail || "defaultemail@example.com";
+
+        console.log(`Using customer info from last JotForm: Name: ${customerFirstName} ${customerLastName}, Email: ${customerEmail}`);
+
+        // Generate PDF with PDFKit (approximates QuestPDF layout)
+        const doc = new PDFDocument({ margin: 40 });
+        const buffers = [];
+        doc.on('data', buffers.push.bind(buffers));
+        doc.on('end', async () => {
+          const pdfBytes = Buffer.concat(buffers);
+
+          // Send email (to "robb_206@outlook.com" as in code, but use customerEmail?)
+          await sendEmailWithPdf("robb_206@outlook.com", "Payment Receipt - HotTubPrescription.com",
+            `Hi ${customerFirstName},\n\nPlease find attached your receipt for ${formattedAmount}.`, pdfBytes);
+
+          console.log(`Email sent to: ${customerEmail}`);
+          res.status(200).end();
+        });
+
+        // PDF Content
+        doc.fontSize(18).font('Helvetica-Bold').text('HotTubPrescription.com', { align: 'center' });
+        doc.moveDown(0.5);
+        doc.fontSize(10).font('Helvetica').text('2009 1st Ave. E. • Bradenton, FL 34208', { align: 'center' });
+        doc.text('Email: info@hottubprescription.com', { align: 'center' });
+        doc.moveDown(1.5);
+        doc.fontSize(16).font('Helvetica-Bold').text('Payment Receipt', { align: 'center', underline: true });
+        doc.moveDown();
+        doc.fontSize(12).text(`Bill To: ${customerFirstName} ${customerLastName}`);
+        doc.moveDown();
+
+        // Table (simple text-based, no real borders in basic PDFKit; can add rects if needed)
+        doc.font('Helvetica-Bold').text('Item Description').moveDown(0.5);
+        doc.font('Helvetica').text('Prescription for Spa, Swim Spa, Sauna, Plunge Tub, Lift Recliner Chair, Massage Chair or Mattress.');
+        doc.moveDown();
+        doc.font('Helvetica-Bold').text(`Amount: ${formattedAmount}`);
+        doc.moveDown();
+        doc.fontSize(12).text(`Transaction ID: ${transactionId}`);
+        doc.moveDown();
+        doc.font('Helvetica-Bold').text(`Total: ${formattedAmount}`);
+        doc.text('Payment Method: PayPal');
+        doc.moveDown(2);
+        doc.text('Thank you for your business!');
+        doc.font('Helvetica-Oblique').fontSize(10).text('If you have any questions about this receipt, please contact us.');
+
+        // Footer
+        doc.fontSize(9).text('HotTubPrescription.com. All rights reserved.', { align: 'center' });
+
+        doc.end();
+      } catch (ex) {
+        if (ex instanceof SyntaxError) {
+          console.error('Error parsing JSON:', ex);
+        } else {
+          console.error('General error processing PayPal webhook:', ex);
+        }
+        res.status(200).end();
+      }
+    });
+  } else if (req.method === 'GET') {  // Test Endpoint
+    const response = `
+Last payment amount received: ${data.lastAmount}
+Last invoice ID: ${data.lastInvoiceId}
+Last transaction ID: ${data.lastTransactionId}
+Customer first name: ${data.lastCustomerFirstName}
+Customer last name: ${data.lastCustomerLastName}
+Customer email: ${data.lastCustomerEmail}
+
+Last JotForm pretty-printed submission: 
+${data.lastJotFormPretty}
+
+Last PayPal raw JSON:
+${data.lastPaypalRaw}`;
+    res.setHeader('Content-Type', 'text/plain');
+    res.send(response);
+  } else {
+    res.status(405).end();  // Method Not Allowed
+  }
+};
