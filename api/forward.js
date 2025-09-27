@@ -1,23 +1,32 @@
 // api/webhook.js
-
 let lastAmount = "No payment received yet";
 let lastInvoiceId = "Unknown";
 let lastTransactionId = "Unknown";
 let lastPaypalRaw = "No PayPal payload received yet";
 
+export const config = {
+  api: {
+    bodyParser: true, // ensure Vercel parses JSON body
+  },
+};
+
 export default async function handler(req, res) {
   if (req.method === 'POST') {
     try {
-      lastPaypalRaw = JSON.stringify(req.body, null, 2);
+      const body = req.body; // now parsed
+      lastPaypalRaw = JSON.stringify(body, null, 2);
 
-      const resource = req.body.resource || {};
-      lastAmount = resource.amount?.value && resource.amount?.currency_code
-        ? `${resource.amount.value} ${resource.amount.currency_code}`
-        : lastAmount;
-      lastInvoiceId = resource.invoice_id || lastInvoiceId;
-      lastTransactionId = resource.id || lastTransactionId;
+      const resource = body.resource || {};
+      const amount = resource.amount || {};
+      const value = amount.value || "0.00";
+      const currency = amount.currency_code || "USD";
+
+      lastAmount = `${value} ${currency}`;
+      lastInvoiceId = resource.invoice_id || "No invoice_id";
+      lastTransactionId = resource.id || "No transaction ID";
 
       console.log("Webhook received:", lastPaypalRaw);
+      console.log("Parsed values:", { lastAmount, lastInvoiceId, lastTransactionId });
 
       return res.status(200).json({ success: true });
     } catch (err) {
@@ -27,7 +36,6 @@ export default async function handler(req, res) {
   }
 
   if (req.method === 'GET') {
-    // Display the extracted fields in browser
     return res.status(200).send(`
 <h2>Last PayPal Webhook Data</h2>
 <p><strong>Amount:</strong> ${lastAmount}</p>
