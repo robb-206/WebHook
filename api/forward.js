@@ -1,16 +1,12 @@
 import express from "express";
-import fs from "fs/promises";
-import pdfLib from "pdfkit"; // Simple PDF generation
-import nodemailer from "nodemailer";
-import { readFileSync } from "fs";
+import { writeFile } from "fs/promises";
+import { createTransport } from "nodemailer"; // nodemailer is still needed for email
+import { Readable } from "stream";
 
 const app = express();
 app.use(express.json());
 
-// Load JSON configuration
-const config = JSON.parse(readFileSync("./config.json", "utf-8"));
-
-// In-memory storage
+// In-memory last payment info
 let lastPayment = {
   amount: null,
   currency: null,
@@ -20,60 +16,69 @@ let lastPayment = {
   rawPayload: null
 };
 
-// Helper to extract nested fields
-function getNested(obj, path) {
-  return path.split(".").reduce((o, k) => (o && o[k] !== undefined ? o[k] : null), obj);
-}
-
-// Generate PDF receipt
+// Simple PDF generator using Node's built-in buffers
 function generatePdf(paymentInfo) {
-  const doc = new pdfLib();
-  const buffers = [];
-  doc.on("data", buffers.push.bind(buffers));
-  doc.on("end", () => {});
+  // This is a minimal PDF structure using basic PDF syntax
+  // It creates a simple PDF with text
+  const text = `
+HotTubPrescription.com
 
-  doc.fontSize(18).text(config.pdfTemplate.header, { align: "center" });
-  doc.moveDown();
-  doc.fontSize(12).text(
-    config.pdfTemplate.customerNameField
-      .replace("{firstName}", paymentInfo.customer.firstName)
-      .replace("{lastName}", paymentInfo.customer.lastName)
+Bill To: ${paymentInfo.customer.firstName} ${paymentInfo.customer.lastName}
+
+Item Description: Prescription for Spa, Swim Spa, Sauna, Plunge Tub, Lift Recliner Chair, Massage Chair or Mattress
+Amount: ${paymentInfo.amount} ${paymentInfo.currency}
+
+Transaction ID: ${paymentInfo.transactionId}
+Total: ${paymentInfo.amount} ${paymentInfo.currency}
+
+Payment Method: PayPal
+
+Thank you for your business!
+  `;
+
+  const pdfHeader = Buffer.from(
+    `%PDF-1.1
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Count 1 /Kids [3 0 R] >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >> endobj
+4 0 obj << /Length ${text.length} >> stream\n`
   );
-  doc.moveDown();
 
-  config.pdfTemplate.table.forEach(row => {
-    doc.text(`${row.item} - ${row.amount.replace("{amount}", paymentInfo.amount).replace("{currency}", paymentInfo.currency)}`);
-  });
+  const pdfFooter = Buffer.from(`\nendstream endobj
+xref
+0 5
+0000000000 65535 f 
+0000000010 00000 n 
+0000000060 00000 n 
+0000000110 00000 n 
+0000000160 00000 n 
+trailer << /Size 5 /Root 1 0 R >>
+startxref
+260
+%%EOF`);
 
-  doc.moveDown();
-  doc.text(`Transaction ID: ${paymentInfo.transactionId}`);
-  doc.text(`Total: ${paymentInfo.amount} ${paymentInfo.currency}`);
-  doc.text(config.pdfTemplate.footer, { align: "center" });
+  const pdfContent = Buffer.from(text);
 
-  doc.end();
-  return Buffer.concat(buffers);
+  return Buffer.concat([pdfHeader, pdfContent, pdfFooter]);
 }
 
-// Send email
+// Send email with built-in nodemailer
 async function sendEmail(paymentInfo, pdfBuffer) {
-  const transporter = nodemailer.createTransport({
+  const transporter = createTransport({
     host: "smtp.gmail.com",
     port: 587,
     secure: false,
     auth: {
-      user: config.emailTemplate.from,
-      pass: process.env.EMAIL_PASSWORD // store securely
+      user: process.env.EMAIL_USER, // set in Vercel env
+      pass: process.env.EMAIL_PASSWORD // set in Vercel env
     }
   });
 
   await transporter.sendMail({
-    from: config.emailTemplate.from,
+    from: process.env.EMAIL_USER,
     to: paymentInfo.customer.email,
-    subject: config.emailTemplate.subject,
-    text: config.emailTemplate.body
-      .replace("{firstName}", paymentInfo.customer.firstName)
-      .replace("{amount}", paymentInfo.amount)
-      .replace("{currency}", paymentInfo.currency),
+    subject: `Payment Receipt - HotTubPrescription.com`,
+    text: `Hi ${paymentInfo.customer.firstName},\n\nPlease find attached your receipt for ${paymentInfo.amount} ${paymentInfo.currency}.`,
     attachments: [
       {
         filename: "Receipt.pdf",
@@ -84,19 +89,19 @@ async function sendEmail(paymentInfo, pdfBuffer) {
 }
 
 // Webhook endpoint
-app.post("/paypal-webhook", async (req, res) => {
+app.post("/api/forward", async (req, res) => {
   try {
     const body = req.body;
     lastPayment.rawPayload = body;
 
-    // Extract fields
-    lastPayment.amount = getNested(body, "resource.amount.value");
-    lastPayment.currency = getNested(body, "resource.amount.currency_code");
-    lastPayment.invoiceId = getNested(body, "resource.invoice_id");
-    lastPayment.transactionId = getNested(body, "resource.id");
-    lastPayment.customer.firstName = getNested(body, "payer.name.given_name") || "Customer";
-    lastPayment.customer.lastName = getNested(body, "payer.name.surname") || "";
-    lastPayment.customer.email = getNested(body, "payer.email_address") || "defaultemail@example.com";
+    // Extract fields from PayPal payload
+    lastPayment.amount = body?.resource?.amount?.value || "0.00";
+    lastPayment.currency = body?.resource?.amount?.currency_code || "USD";
+    lastPayment.invoiceId = body?.resource?.invoice_id || "Unknown";
+    lastPayment.transactionId = body?.resource?.id || "Unknown";
+    lastPayment.customer.firstName = body?.payer?.name?.given_name || "Customer";
+    lastPayment.customer.lastName = body?.payer?.name?.surname || "";
+    lastPayment.customer.email = body?.payer?.email_address || process.env.EMAIL_USER;
 
     // Generate PDF
     const pdfBuffer = generatePdf(lastPayment);
@@ -112,11 +117,11 @@ app.post("/paypal-webhook", async (req, res) => {
   }
 });
 
-// Test endpoint
-app.get("/paypal-webhook/test", (req, res) => {
+// Test endpoint to view last payment
+app.get("/api/forward/test", (req, res) => {
   res.json(lastPayment);
 });
 
 app.listen(process.env.PORT || 3000, () => {
-  console.log("PayPal webhook server running on port 3000");
+  console.log("PayPal webhook server running");
 });
