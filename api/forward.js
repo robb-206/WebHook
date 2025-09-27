@@ -8,8 +8,8 @@ let lastTransactionId = "Unknown";
 let lastPaypalRaw = "No PayPal payload received yet";
 
 // Replace these with your sandbox credentials
-const PAYPAL_CLIENT_ID = "YOUR_CLIENT_ID";
-const PAYPAL_SECRET = "YOUR_SECRET";
+const PAYPAL_CLIENT_ID = "ASK7Hk7YyRS-jh6h6dqmxONNPjyx4gZXc1ZhY9dO6l1P1ggt4mOdXkpurySzZWkU6G_PtG3qVfi22MVz";
+const PAYPAL_SECRET = "EAHTIg0RL66_PHBW_-3eEgORIVBm8WXHGNTRNtSMjRkR-BHwPGTWQM3o22IECCzCQhbl7kUDEB5DicII";
 
 export const config = {
   api: { bodyParser: false }, // Disable automatic parsing
@@ -109,3 +109,4 @@ export default async function handler(req, res) {
   res.setHeader('Allow', ['POST','GET']);
   return res.status(405).end(`Method ${req.method} Not Allowed`);
 }
+
