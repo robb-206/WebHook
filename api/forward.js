@@ -1,12 +1,29 @@
+// api/webhook.js
+const fetch = require('node-fetch');
 
-
-module.exports = (req, res) => {
+module.exports = async (req, res) => {
   try {
-    // Optional: Add logic here, e.g., check req.query or fetch from Azure
-    const azureUrl = 'https://htdev-bvhyhpbzgbg3apdh.canadacentral-01.azurewebsites.net/HottubWebhook';  // Or build dynamically
-    res.redirect(301, azureUrl);  // 301 permanent; use 302 for temporary
+    const azureUrl = 'https://htdev-bvhyhpbzgbg3apdh.canadacentral-01.azurewebsites.net/HottubWebhook';
+
+    // Forward original request to Azure
+    const response = await fetch(azureUrl, {
+      method: req.method,
+      headers: { ...req.headers, host: undefined }, // drop host header
+      body: req.method !== 'GET' && req.method !== 'HEAD' ? JSON.stringify(req.body) : undefined,
+    });
+
+    // Pass through status and headers
+    res.status(response.status);
+    response.headers.forEach((value, key) => {
+      res.setHeader(key, value);
+    });
+
+    // Send back response body
+    const text = await response.text();
+    res.send(text);
+
   } catch (error) {
-    console.error('Redirect error:', error);  // Log for debugging
-    res.status(500).json({ error: 'Internal redirect error' });
+    console.error('Forwarding error:', error);
+    res.status(500).json({ error: 'Failed to forward request' });
   }
 };
