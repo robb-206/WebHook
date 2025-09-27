@@ -7,35 +7,37 @@ import fetch from "node-fetch";
 
 // Environment variables with defaults
 const {
-  LISTEN_PORT = 3000, // Use 443 for production, 3000 for local testing with ngrok
-  LISTEN_PATH = "/webhook", // Simplified path for testing
-  CACHE_DIR = "./cache", // Explicit cache dir
+  LISTEN_PATH = "/api/forward",
+  CACHE_DIR = "/tmp/cache", // Vercel only allows writes to /tmp
   WEBHOOK_ID = "4R839067G13323109", // Your PayPal webhook ID
 } = process.env;
 
 // Ensure cache directory exists
-await fs.mkdir(CACHE_DIR, { recursive: true }).catch((err) => {
+try {
+  await fs.mkdir(CACHE_DIR, { recursive: true });
+  console.log(`Cache directory ready: ${CACHE_DIR}`);
+} catch (err) {
   console.error(`Failed to create cache directory: ${err.message}`);
-  process.exit(1); // Exit if cache dir can't be created
-});
+}
 
 async function downloadAndCache(url, cacheKey) {
   try {
-    if (!cacheKey) {
-      cacheKey = url.replace(/\W+/g, "-");
-    }
+    if (!url) throw new Error("No certificate URL provided");
+    if (!cacheKey) cacheKey = url.replace(/\W+/g, "-");
     const filePath = `${CACHE_DIR}/${cacheKey}`;
 
     // Check if cached file exists
-    const cachedData = await fs.readFile(filePath, "utf-8").catch(() => null);
-    if (cachedData) {
+    try {
+      const cachedData = await fs.readFile(filePath, "utf-8");
       console.log(`Using cached certificate for ${url}`);
       return cachedData;
+    } catch (err) {
+      console.log(`No cached certificate found for ${url}`);
     }
 
     // Download certificate
     console.log(`Fetching certificate from ${url}`);
-    const response = await fetch(url);
+    const response = await fetch(url, { timeout: 5000 }); // Add timeout for Vercel
     if (!response.ok) {
       throw new Error(`Failed to fetch certificate: ${response.statusText}`);
     }
@@ -46,21 +48,55 @@ async function downloadAndCache(url, cacheKey) {
     return data;
   } catch (err) {
     console.error(`Error in downloadAndCache: ${err.message}`);
-    throw err; // Let caller handle
+    throw err;
+  }
+}
+
+async function verifySignature(event, headers) {
+  try {
+    const transmissionId = headers["paypal-transmission-id"];
+    const timeStamp = headers["paypal-transmission-time"];
+    const certUrl = headers["paypal-cert-url"];
+    const signature = headers["paypal-transmission-sig"];
+
+    if (!transmissionId || !timeStamp || !certUrl || !signature) {
+      throw new Error("Missing required PayPal headers");
+    }
+
+    // Calculate CRC32 of raw event body
+    const crc = crc32(event).toString("hex");
+    const message = `${transmissionId}|${timeStamp}|${WEBHOOK_ID}|${crc}`;
+    console.log(`Signature message: ${message}`);
+
+    // Fetch certificate
+    const certPem = await downloadAndCache(certUrl);
+
+    // Verify signature
+    const verifier = crypto.createVerify("SHA256");
+    verifier.update(message);
+    const signatureBuffer = Buffer.from(signature, "base64");
+    const isValid = verifier.verify(certPem, signatureBuffer);
+    console.log(`Signature verification result: ${isValid}`);
+    return isValid;
+  } catch (err) {
+    console.error(`Signature verification failed: ${err.message}`);
+    return false; // Fail safely
   }
 }
 
 const app = express();
-
-// Parse raw JSON body for PayPal webhooks
 app.use(express.raw({ type: "application/json" }));
 
 app.post(LISTEN_PATH, async (request, response) => {
   try {
+    console.log("Webhook received");
     const headers = request.headers;
     const event = request.body; // Raw Buffer
 
-    // Validate required headers
+    // Log headers for debugging
+    console.log("Headers:", JSON.stringify(headers, null, 2));
+
+    // Validate headers
     const requiredHeaders = [
       "paypal-transmission-id",
       "paypal-transmission-time",
@@ -74,68 +110,37 @@ app.post(LISTEN_PATH, async (request, response) => {
       }
     }
 
-    // Parse JSON safely
+    // Parse JSON
     let data;
     try {
       data = JSON.parse(event.toString());
+      console.log("Parsed JSON:", JSON.stringify(data, null, 2));
     } catch (err) {
       console.error(`Failed to parse JSON: ${err.message}`);
       return response.status(400).json({ error: "Invalid JSON payload" });
     }
 
-    // Log payload for debugging
-    console.log("Headers:", headers);
-    console.log("Parsed JSON:", JSON.stringify(data, null, 2));
-
-    // Verify PayPal signature
+    // Verify signature (optional for initial debugging)
     const isSignatureValid = await verifySignature(event, headers);
     if (isSignatureValid) {
       console.log("Signature is valid.");
-      // TODO: Process webhook data (e.g., generate receipt, email)
-      console.log("Received event:", JSON.stringify(data, null, 2));
-      // Example: Save to DB, generate PDF receipt, send email
+      // TODO: Process payment (e.g., generate receipt, email)
+      console.log("Event data:", JSON.stringify(data, null, 2));
     } else {
       console.error(
-        `Invalid signature for event ${data?.id} (correlation-id: ${headers["paypal-transmission-id"]})`
+        `Invalid signature for event ${data?.id || "unknown"} (correlation-id: ${
+          headers["paypal-transmission-id"]
+        })`
       );
     }
 
-    // Always return 200 to acknowledge receipt (PayPal requirement)
+    // Acknowledge webhook to PayPal
     return response.sendStatus(200);
   } catch (err) {
-    console.error(`Error processing webhook: ${err.message}`);
-    return response.sendStatus(200); // Still acknowledge to PayPal, log error for debugging
+    console.error(`Webhook error: ${err.message}\nStack: ${err.stack}`);
+    return response.sendStatus(200); // PayPal expects 200 even on errors
   }
 });
 
-async function verifySignature(event, headers) {
-  try {
-    const transmissionId = headers["paypal-transmission-id"];
-    const timeStamp = headers["paypal-transmission-time"];
-    const certUrl = headers["paypal-cert-url"];
-    const signature = headers["paypal-transmission-sig"];
-
-    // Calculate CRC32 of raw event body (hex string)
-    const crc = crc32(event).toString("hex");
-    const message = `${transmissionId}|${timeStamp}|${WEBHOOK_ID}|${crc}`;
-    console.log(`Signature message: ${message}`);
-
-    // Fetch and cache PayPal certificate
-    const certPem = await downloadAndCache(certUrl);
-
-    // Verify signature
-    const verifier = crypto.createVerify("SHA256");
-    verifier.update(message);
-    const signatureBuffer = Buffer.from(signature, "base64");
-    const isValid = verifier.verify(certPem, signatureBuffer);
-
-    return isValid;
-  } catch (err) {
-    console.error(`Signature verification failed: ${err.message}`);
-    return false; // Fail safely
-  }
-}
-
-app.listen(LISTEN_PORT, () => {
-  console.log(`Server listening at http://localhost:${LISTEN_PORT}${LISTEN_PATH}`);
-});
+// Export for Vercel serverless
+export default app;
