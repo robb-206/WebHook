@@ -1,16 +1,55 @@
 // api/webhook.js
 import qs from 'querystring';
+import fetch from 'node-fetch';
 
 let lastAmount = "No payment received yet";
 let lastInvoiceId = "Unknown";
 let lastTransactionId = "Unknown";
 let lastPaypalRaw = "No PayPal payload received yet";
 
+// Replace these with your sandbox credentials
+const PAYPAL_CLIENT_ID = "YOUR_CLIENT_ID";
+const PAYPAL_SECRET = "YOUR_SECRET";
+
 export const config = {
-  api: {
-    bodyParser: false, // Disable automatic parsing
-  },
+  api: { bodyParser: false }, // Disable automatic parsing
 };
+
+async function getPaypalAccessToken() {
+  const auth = Buffer.from(`${PAYPAL_CLIENT_ID}:${PAYPAL_SECRET}`).toString('base64');
+  const resp = await fetch('https://api.sandbox.paypal.com/v1/oauth2/token', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Basic ${auth}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: 'grant_type=client_credentials',
+  });
+  const data = await resp.json();
+  return data.access_token;
+}
+
+async function verifyWebhook(body, headers) {
+  const accessToken = await getPaypalAccessToken();
+  const resp = await fetch('https://api.sandbox.paypal.com/v1/notifications/verify-webhook-signature', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      auth_algo: headers['paypal-auth-algo'],
+      cert_url: headers['paypal-cert-url'],
+      transmission_id: headers['paypal-transmission-id'],
+      transmission_sig: headers['paypal-transmission-sig'],
+      transmission_time: headers['paypal-transmission-time'],
+      webhook_id: 'YOUR_SANDBOX_WEBHOOK_ID', // Replace with your webhook ID
+      webhook_event: body
+    }),
+  });
+  const data = await resp.json();
+  return data.verification_status === 'SUCCESS';
+}
 
 export default async function handler(req, res) {
   if (req.method === 'POST') {
@@ -22,19 +61,24 @@ export default async function handler(req, res) {
         req.on('end', () => { bodyText = data; resolve(); });
       });
 
-      // Attempt to parse JSON directly
+      // Parse JSON or fallback to form-encoded
       let body;
       try {
         body = JSON.parse(bodyText);
       } catch {
-        // If parsing fails, treat as form-encoded
         const parsed = qs.parse(bodyText);
-        // PayPal may send JSON as a key in form-encoded body
         const key = Object.keys(parsed)[0];
         body = JSON.parse(key);
       }
 
       lastPaypalRaw = JSON.stringify(body, null, 2);
+
+      // Verify webhook
+      const verified = await verifyWebhook(body, req.headers);
+      if (!verified) {
+        console.warn("Webhook verification failed!");
+        return res.status(400).json({ error: 'Webhook verification failed' });
+      }
 
       const resource = body.resource || {};
       const amount = resource.amount || {};
